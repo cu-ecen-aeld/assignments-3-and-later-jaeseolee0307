@@ -1,3 +1,5 @@
+#!/bin/sh
+
 if [ "$#" -ne 2 ]; then
     echo "Error: No argument of the directory path and the search string."
     exit 1
