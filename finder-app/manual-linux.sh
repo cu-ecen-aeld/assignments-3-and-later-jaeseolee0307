@@ -101,7 +101,6 @@ sudo cp -a $SYSROOT/lib/* lib
 sudo cp -a $SYSROOT/lib64/* lib64
 
 
-# TODO: Make device nodes
 cd "$OUTDIR/rootfs"
 sudo mknod -m 666 dev/null c 1 3
 sudo mknod -m 600 dev/console c 5 1
