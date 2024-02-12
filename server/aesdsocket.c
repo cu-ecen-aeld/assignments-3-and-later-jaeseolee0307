@@ -67,6 +67,7 @@ void handle_client(int client_socket) {
         }
     }
 
+
     // Check for receive error
     if (bytes_received < 0) {
         syslog(LOG_ERR, "Error receiving data from client: %s", strerror(errno));
