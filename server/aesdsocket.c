@@ -35,6 +35,7 @@ void handle_client(int client_socket) {
         exit(EXIT_FAILURE);
     }
 
+
     char buffer[BUFFER_SIZE];
     ssize_t bytes_received;
 
