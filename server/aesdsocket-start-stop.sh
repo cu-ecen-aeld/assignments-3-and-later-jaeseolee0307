@@ -1,8 +1,5 @@
 #!/bin/bash
 
-DAEMON=/usr/bin/aesdsocket
-NAME=aesdsocket
-DESC="AESD Socket Application"
 
 case "$1" in
     start)
