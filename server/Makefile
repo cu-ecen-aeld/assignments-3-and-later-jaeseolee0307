@@ -1,27 +1,16 @@
-# Compiler and flags
 CC := $(CROSS_COMPILE)gcc
-CFLAGS := -Wall -Wextra
 
-# Source files and object files
-SRC := aesdsocket.c
-OBJ := $(SRC:.c=.o)
-TARGET := aesdsocket
+CFLAGS := -g -Wall -Werror
 
-# Phony targets
-.PHONY: all clean
+default : aesdsocket
 
-# Default target
-all: $(TARGET)
+all: aesdsocket
 
-# Linking target
-$(TARGET): $(OBJ)
-	$(CC) $(CFLAGS) -o $@ $^
+aesdsocket : aesdsocket.o
+	$(CC) $(CFLAGS) aesdsocket.o -o aesdsocket
 
-# Compilation target
-%.o: %.c
-	$(CC) $(CFLAGS) -c -o $@ $<
+aesdsocket.o: aesdsocket.c
+	$(CC) $(CFLAGS) -c aesdsocket.c
 
-# Clean target
 clean:
-	rm -f $(OBJ) $(TARGET)
-
+	-rm -f *.o aesdsocket
