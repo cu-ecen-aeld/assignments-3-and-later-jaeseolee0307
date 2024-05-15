@@ -1,16 +1,22 @@
-CC := $(CROSS_COMPILE)gcc
 
-CFLAGS := -g -Wall -Werror
+SRC=$(wildcard *.c)
+DEP=$(SRC:.c=.o)
+FLAGS= -g -Wall -Werror -I. -lpthread -lrt 
 
-default : aesdsocket
+ifeq ($(CROSS_COMPILE),)
+	CC=gcc
+else
+	CC=$(addprefix $(CROSS_COMPILE), gcc)
+endif
 
-all: aesdsocket
 
-aesdsocket : aesdsocket.o
-	$(CC) $(CFLAGS) aesdsocket.o -o aesdsocket
+all: $(DEP)  aesdsocket 
 
-aesdsocket.o: aesdsocket.c
-	$(CC) $(CFLAGS) -c aesdsocket.c
+%: %.o
+	$(CC) $(FLAG) -o $@ $(DEP) -Wl,-Map=mapfile.map
+
+%.o: %.c %.h
+	$(CC) $(FLAG) -c $< -o $@ 
 
 clean:
-	-rm -f *.o aesdsocket
+	rm -rf *.o aesdsocket *.map
