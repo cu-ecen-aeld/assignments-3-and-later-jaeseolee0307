@@ -50,5 +50,7 @@ void append_string(char **buf, size_t* maxbuflen, size_t buflen, char *in_buf, i
         *maxbuflen += buflen + 2*n;
         *buf = realloc(*buf, *maxbuflen);
     } 
+    
     strncat(*buf, in_buf, n);
+    
 }
