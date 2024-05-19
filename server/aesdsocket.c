@@ -86,6 +86,12 @@ void make_daemon() {
     umask(0);
     // change dir /
     chdir("/");
+
+    if (chdir("/") != 0) {
+        fprintf(stderr, "Error changing directory: %s\n", strerror(errno));
+        // Handle the error appropriately, for example, exit the program
+        return 1;
+    }
     // close all open file descriptors
     // for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
     //     close(x);
