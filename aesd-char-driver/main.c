@@ -67,7 +67,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
         return -ERESTART;
     }
 
-    temp_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(aesd_device.circBuff), *f_pos, &char_offset);
+    temp_entry = aesd_circular_buffer_find_entry_offset_for_fpos(&(aesd_device.circ_buff), *f_pos, &char_offset);
     
     if(temp_entry == NULL)
     {
@@ -159,7 +159,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
         new_entry->size=count+curr_count;
         new_entry->buff_ptr=aesd_device.buff_str;
 
-        ret_entry = aesd_circular_buffer_add_entry(&aesd_device.circBuff, new_entry);
+        ret_entry = aesd_circular_buffer_add_entry(&aesd_device.circ_buff, new_entry);
         kfree(ret_entry);
         aesd_device.buff_str = NULL;
     }
@@ -236,7 +236,7 @@ void aesd_cleanup_module(void)
 
     kfree(aesd_device.buff_str);
 
-    AESD_CIRCULAR_BUFFER_FOREACH(temp_entry, &aesd_device.circBuff, i)
+    AESD_CIRCULAR_BUFFER_FOREACH(temp_entry, &aesd_device.circ_buff, i)
     {
         kfree(temp_entry->buff_ptr);
     }
