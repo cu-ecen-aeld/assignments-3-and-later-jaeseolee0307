@@ -90,7 +90,7 @@ void make_daemon() {
     if (chdir("/") != 0) {
         fprintf(stderr, "Error changing directory: %s\n", strerror(errno));
         // Handle the error appropriately, for example, exit the program
-        return 1;
+        //return 0;
     }
     // close all open file descriptors
     // for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
@@ -405,7 +405,7 @@ int main(int argc, char **argv) {
     pthread_mutex_init(&mutex, &attr);
     pthread_mutexattr_destroy(&attr);
 
-    create_timer();
+    //create_timer();
 
     for( ; stopApp < 1 ; ) {
         accept_conn();

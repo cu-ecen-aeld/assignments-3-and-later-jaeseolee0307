@@ -1,6 +1,6 @@
 #include <stdio.h>
 
-#define DATA_FILE_PATH "/var/tmp/aesdsocketdata"
+#define DATA_FILE_PATH "/dev/aesdchar"
 
 int open_datafile();
 void close_datafile(int fd);
