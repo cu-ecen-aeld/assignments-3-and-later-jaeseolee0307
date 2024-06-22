@@ -1,414 +1,516 @@
-#define _GNU_SOURCE
+#include <sys/socket.h>
+#include <stdio.h>
+#include <sys/types.h>
+#include <netdb.h>
 #include <string.h>
+#include <syslog.h>
+#include <unistd.h>
+
 #include <stdlib.h>
 #include <unistd.h>
-#include <sys/stat.h>
-#include <sys/socket.h>
-#include <netdb.h>
-#include <arpa/inet.h>
-#include <errno.h>
-#include <syslog.h>
+#include <string.h>
 #include <signal.h>
+
+#include <arpa/inet.h>
+#include <stdbool.h>
+#include <errno.h>
 #include <time.h>
-#include "aesdsocket.h"
-#include "datafile.h"
 
-#define SERVER_PORT "9000"
-#define LISTEN_BACKLOG 10
-#define NEWLINE '\n'
-#define ISO_2822_TIME_FMT "%a, %d %b %Y %T %z"
+#include <pthread.h>
+#include <sys/time.h>
+
+#define SIZE_BUFFER 1000
+#define STR_PORT "9000"
+// ipv6 takes 39 characters
+#define IP_LENTH 39
+
+#define USE_AESD_CHAR_DEVICE 1
+#ifdef USE_AESD_CHAR_DEVICE
+#define OUTPUT_FILENAME "/dev/aesdchar"
+#else
+#define OUTPUT_FILENAME "/var/tmp/aesdsocketdata"
+#endif
+
+// mask off this to remove Alarm related function.
+//#define USE_ALARM
+
+#define PID_FILE "/var/run/aesdsocket.pid"
+
+//#define LOGCONSOLE 
+
+#if defined (LOGCONSOLE)
+#define DBGLOG(...) printf (__VA_ARGS__)
+#define ERRLOG(...) printf (__VA_ARGS__)
+#else
+#define DBGLOG(...) syslog(LOG_DEBUG,__VA_ARGS__)
+#define ERRLOG(...) syslog(LOG_ERR,__VA_ARGS__) 
+#endif
 
 
-int server_fd;
-int data_fd;
-timer_t timer_id;
-pthread_mutex_t mutex;
-volatile sig_atomic_t stopApp;
+// thread realted items;
+struct listOfThread 
+{
+    pthread_t thread; 
+    int sdClient;
+    char strIP[IP_LENTH];
 
-void cleanup() {
-    close_datafile(data_fd);
-    if (server_fd > 0) {
-        close(server_fd);
+    struct listOfThread * pNext;
+    struct listOfThread * pPrevious;
+
+    bool isComplete; 
+};
+
+// static items 
+static struct listOfThread * pListHead = NULL;
+static struct listOfThread * pListTail = NULL;
+static pthread_mutex_t mutexFOutput;
+
+void * threadHandler(void *);
+
+
+int strGetIP(const struct sockaddr *sa, char *s, size_t maxlen);
+void signalHandler(int signal);
+
+bool quitServices = false;
+
+#ifdef USE_ALARM
+bool isAlarmed = false;
+#endif // USE_ALARM
+
+int main(int argc, char * argv[])
+{
+    int iReturnValue = -1; // default is failure
+
+#if !defined (LOGCONSOLE)
+    openlog(NULL, LOG_PID, LOG_USER);
+#endif
+
+    // ignore SIGPIPE
+    if(SIG_ERR == signal(SIGPIPE, SIG_IGN))
+    {
+        ERRLOG("Ignore SIGPIPE failed: %s \n", strerror(errno));
+        goto closelog;
     }
 
-    closelog();
-}
+    if(SIG_ERR == signal(SIGINT, signalHandler))
+    {
+        ERRLOG("Register SIGINT failed: %s \n", strerror(errno));
+        goto closelog;
+    }
 
-static void signal_handler(int signum) {
-    if (signum == SIGINT || signum == SIGTERM) {
-        stopApp = 1;
-        syslog(LOG_DEBUG, "%s", "Caught signal, exiting");
+    if(SIG_ERR == signal(SIGTERM, signalHandler))
+    {
+        ERRLOG("Register SIGTERM failed: %s \n", strerror(errno));
+        goto closelog;
+    }
 
-        if (server_fd > 0) {
-            while (shutdown(server_fd, SHUT_RDWR) == -1) {
-                syslog(LOG_ERR, "Server socket shutdown error: %s", strerror(errno));
+#ifdef USE_ALARM
+    if(SIG_ERR == signal(SIGALRM, signalHandler))
+    {
+        ERRLOG("Register SIGALRM failed: %s \n", strerror(errno));
+        goto closelog;
+    }
+#endif // USE_ALARM
+    
+    int sdListen = socket(AF_INET, SOCK_STREAM | SOCK_NONBLOCK, 0);
+    if(-1 == sdListen)
+    {
+        ERRLOG("Get socket failed: %s \n", strerror(errno));
+        goto closelog;
+    }
+
+    int iVar = 1;
+    if (setsockopt(sdListen, SOL_SOCKET, SO_REUSEADDR, (char *)&iVar, sizeof(iVar)) < 0)
+        DBGLOG("setsockopt:SO_REUSEADDR failed.");
+
+#ifdef SO_REUSEPORT
+    if (setsockopt(sdListen, SOL_SOCKET, SO_REUSEPORT, (char *)&iVar, sizeof(iVar)) < 0)
+        DBGLOG("setsockopt:SO_REUSEPORT failed.");
+#endif
+
+    struct addrinfo serverAdd;  
+    struct addrinfo *addInfo = NULL;  
+    memset(&serverAdd, 0, sizeof(serverAdd));
+
+    // If the AI_PASSIVE flag is specified in hints.ai_flags, and node  is  NULL,
+    // then  the  returned  socket  addresses  will  be suitable for bind(2)ing a
+    // socket that will accept(2) connections.
+    serverAdd.ai_flags = AI_PASSIVE;
+    if(0 != getaddrinfo(NULL, STR_PORT, &serverAdd, &addInfo))
+    {
+        ERRLOG("getaddrinfo failed: %s \n", strerror(errno));
+        goto closeSDListen;
+    }
+
+    // test a 
+    bool bBind = false;
+    for(struct addrinfo * cur = addInfo ; cur != NULL ; cur = cur->ai_next)
+    {
+        struct sockaddr_in *addr = (struct sockaddr_in *)cur->ai_addr;
+        char ipbuf[16];
+        int port;
+        DBGLOG("ip: %s\n", inet_ntop(AF_INET, &addr->sin_addr, ipbuf, 16));
+        DBGLOG("port: %s\n", inet_ntop(AF_INET, &addr->sin_port, (void *)&port, 2));
+        DBGLOG("- family: %d\n", addr->sin_family);
+
+        // try other addresses ....
+        if(0!= bind(sdListen, cur->ai_addr, cur->ai_addrlen))
+        {
+            ERRLOG("bind failed: %s, try next one. \n", strerror(errno));
+            continue;
+        }
+        else
+        {
+            // success in binding ... 
+            bBind = true;
+            break;
+        }
+    }
+
+    if(!bBind)
+    {
+        ERRLOG("all bind failed: %s \n", strerror(errno));
+        goto freeAddrinfo;
+    }
+
+    if(argc > 1 && NULL != argv[1] && 0 == strcmp("-d", argv[1]))
+    {
+        DBGLOG("Entering daemon mode.");
+        // 
+        pid_t pRetFork = fork();
+        if(-1 == pRetFork)
+        {
+            // if something wrong happened,
+            goto freeAddrinfo;
+        }
+
+        if(0 == pRetFork)
+        {
+            // We are in child process and return only failed.
+            // child process continues ... 
+            //if(-1 == setsid())
+        }
+        else
+        {
+            // record child process id
+            FILE * pidfile = fopen(PID_FILE, "w");
+            if(NULL != pidfile)
+            {
+                DBGLOG("creating pid file.");
+                fprintf(pidfile, "%d", pRetFork);
+                fclose(pidfile);
             }
-            close(server_fd);
-        }
-        // delete timer
-        if (timer_id && timer_delete(timer_id) != 0) {
-            syslog(LOG_ERR, "Failure to delete timer: %s", strerror(errno));
-        }
 
-        // looping thru connections and terminate threads
-        clientconn_info *conn;
-        SLIST_FOREACH(conn, &connections, next) {
-            pthread_cancel(conn->thread_id);
+            // we are in parent process
+            goto successExit;
         }
-        cleanup_term_conn(1);
-        pthread_mutex_destroy(&mutex);
-
-        close_datafile(data_fd);
-        closelog();
     }
+
+    if(0 != listen(sdListen, 10))
+    {
+        ERRLOG("listen failed: %s \n", strerror(errno));
+        goto freeAddrinfo;
+    }
+
+#ifdef USE_ALARM
+    DBGLOG("fopening file: %s \n", OUTPUT_FILENAME);
+    FILE * fOutput = fopen(OUTPUT_FILENAME, "a+");
+    if(NULL == fOutput)
+    {
+        ERRLOG("fopen failed: %s \n", strerror(errno));
+        goto freeAddrinfo;
+    }
+
+    // setup a timer for every 10s 
+    struct itimerval newValue;
+    newValue.it_interval.tv_sec = 10; // every 10 seconds
+    newValue.it_interval.tv_usec = 0;
+    newValue.it_value = newValue.it_interval;
+    if(-1 == setitimer(ITIMER_REAL, &newValue, NULL))
+    {
+        DBGLOG("setitimer failed: %s \n", strerror(errno));
+    }
+#endif // USE_ALARM
+    
+    time_t t = time(NULL);
+    // start services:
+    while(!quitServices)
+    {
+        struct sockaddr clientAddr; 
+        socklen_t clientAddrLen = sizeof(clientAddr) ; 
+        memset(&clientAddr, 0, sizeof(clientAddr));
+
+#ifdef USE_ALARM
+        if(isAlarmed)
+        {
+            isAlarmed = false;
+            //RFC 2822-compliant date format with a newline
+            //  (with an English locale for %a and %b)
+            char strRFC2822[] = "timestamp:%a, %d %b %Y %T %z\n";
+
+            t = time(NULL);
+            struct tm * tmp = localtime(&t);
+            if(NULL != tmp)
+            {
+                char tmString[200];
+                int iRet = strftime(tmString, sizeof(tmString), strRFC2822, tmp);
+                if(0 != iRet)
+                {
+                    tmString[iRet]= '\0';
+                    DBGLOG("alarm triggerd: %s \n", tmString);
+                    pthread_mutex_lock(&(mutexFOutput));
+                    fseek(fOutput, 0L, SEEK_END); 
+                    fwrite(tmString, 1 , iRet, fOutput);
+                    fflush(fOutput);
+                    pthread_mutex_unlock(&(mutexFOutput));
+                }
+                else 
+                   DBGLOG("strftime returned 0: %s \n", strerror(errno));
+
+            }
+            else 
+                DBGLOG("Incorrect NULL locatime: %s \n", strerror(errno));
+        }
+#endif 
+ 
+        // Join all complete child threads.
+        struct listOfThread * pList = pListHead;
+        while(NULL != pList)
+        {
+            struct listOfThread * pTmp = pList; 
+            pList = pList->pNext;
+
+            if(pTmp -> isComplete)
+            {
+                if(NULL != pTmp->pPrevious)
+                    pTmp->pPrevious->pNext = pTmp->pNext; 
+                if(NULL != pTmp->pNext)
+                    pTmp->pNext->pPrevious = pTmp->pPrevious;
+                if(pListHead == pTmp)
+                    pListHead = pTmp->pNext;
+                if(pListTail == pTmp)
+                    pListTail = pTmp->pPrevious;
+                
+                void * p; 
+                pthread_join(pTmp->thread, &p);
+                free(pTmp);
+            }
+        }
+        
+
+        //  
+        int sdClient = accept(sdListen, &clientAddr, &clientAddrLen);
+        if(-1 == sdClient)
+        {
+            if(EWOULDBLOCK == errno || EAGAIN == errno)
+                continue;
+
+            ERRLOG("accept failed: %s \n", strerror(errno));
+            break;
+        }
+        
+        DBGLOG("accepted 1 connection \n");
+
+        pList = malloc(sizeof(struct listOfThread));
+        if(NULL == pList)
+        {
+            // running out of memory?
+            ERRLOG(" failed malloc pList: %s \n", strerror(errno));
+            break;
+        }
+
+        // get the ip address of the client:
+        memset(pList->strIP, 0, IP_LENTH);
+        strGetIP(&clientAddr, pList->strIP, IP_LENTH);
+        DBGLOG("Accepted connection from %s , %d @ %s.\n", 
+                pList->strIP, sdClient, ctime(&t));
+
+
+        pList->pNext = NULL;
+        pList->pPrevious = NULL;
+        pList->isComplete = false;
+        pList->sdClient = sdClient;
+
+        if(NULL == pListHead)
+            pListHead = pList;
+        if(NULL == pListTail)
+            pListTail = pList;
+        else
+        {
+            pList->pPrevious = pListTail;
+            pListTail->pNext = pList;
+            pListTail=pList;
+        }
+
+        int iRet = pthread_create(&(pList->thread),NULL, &threadHandler, pList); 
+        if(0 != iRet)
+        {
+            // when thread created wrong, will remove it from list:
+            pListTail = pList->pPrevious;
+            if(NULL != pListTail)
+                pListTail->pNext = NULL;
+
+            free(pList);
+            ERRLOG(" failed malloc pList: %s \n", strerror(errno));
+            break;
+        }
+    }
+
+    if(quitServices) 
+        DBGLOG("Caught signal, exiting\n");
+
+#ifndef USE_AESD_CHAR_DEVICE
+    if (0 !=  remove(OUTPUT_FILENAME))
+        DBGLOG("Remove file %s failed.\n", OUTPUT_FILENAME);
+#endif
+    
+    // Join all child threads.
+    struct listOfThread * pList = pListHead;
+    while(NULL != pList)
+    {
+        void * p; 
+        pthread_join(pList->thread, &p);
+
+        struct listOfThread * pTmp = pList; 
+        pList = pList->pNext;
+        free(pTmp);
+    }
+   
+
+#ifdef USE_ALARM
+    fclose(fOutput);
+#endif // USE_ALARM
+
+successExit:
+    iReturnValue = 0;
+
+freeAddrinfo:
+    freeaddrinfo(addInfo);
+
+closeSDListen:
+    close(sdListen);
+
+closelog:
+#if !defined (LOGCONSOLE)
+    closelog();
+#endif
+    return iReturnValue;
 }
 
-void make_daemon() {
-    // we can use daemon syscall or use two-fork approach
-    int pid = fork();
-    if (pid < 0) {
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
-        exit(EXIT_SUCCESS);
+
+int strGetIP(const struct sockaddr *sa, char *s, size_t maxlen)
+{
+    switch(sa->sa_family) 
+    {
+        case AF_INET:
+            inet_ntop(AF_INET, &(((struct sockaddr_in *)sa)->sin_addr),
+                    s, maxlen);
+            break;
+
+        case AF_INET6:
+            inet_ntop(AF_INET6, &(((struct sockaddr_in6 *)sa)->sin6_addr),
+                    s, maxlen);
+            break;
+
+        default:
+            DBGLOG("unknow ip address.\n");
+            return -1;
     }
-
-    if (setsid() < 0) {
-        exit(EXIT_FAILURE);
-    }
-
-    if ((pid = fork()) < 0) {
-        exit(EXIT_FAILURE);
-    } else if (pid > 0) {
-        exit(EXIT_SUCCESS);
-    }
-
-    // file perm
-    umask(0);
-    // change dir /
-    chdir("/");
-
-    if (chdir("/") != 0) {
-        fprintf(stderr, "Error changing directory: %s\n", strerror(errno));
-        // Handle the error appropriately, for example, exit the program
-        //return 0;
-    }
-    // close all open file descriptors
-    // for (int x = sysconf(_SC_OPEN_MAX); x >= 0; x--) {
-    //     close(x);
-    // }
-}
-
-int send_response(int data_fd, int client_fd) {
-    char readbuf[BUFFER_SIZE];
-    int m;
-    // position to the beginning
-    adjust_datafile_pos(data_fd, 0, SEEK_SET);
-
-    while((m = read(data_fd, readbuf, sizeof(readbuf))) > 0) {
-        int rc = send(client_fd, readbuf, m, 0);
-        if (rc < 0) {
-            return rc;
-        }
-    }
-
     return 0;
 }
 
-void* connnection_handler(void* param) {
-    struct aesdsocketclientconn* args = (struct aesdsocketclientconn *) param;
 
-    pthread_cleanup_push(connection_cleanup, args);
+void signalHandler(int signal)
+{
+    if(SIGINT == signal || SIGTERM == signal )
+        quitServices = true; 
 
-    syslog(LOG_DEBUG, "Accepted connection from %s", args->client_ip_addr);
-    int data_fd = args->data_fd;
+#ifdef USE_ALARM
+    if(SIGALRM == signal)
+        isAlarmed = true;
+#endif // USE_ALARM
+}
 
-    if (adjust_datafile_pos(data_fd, 0, SEEK_END) > -1) { // position to EOF
 
-        size_t maxbuflen = args->init_buffer_size;
-        char recv_buf[BUFFER_SIZE];
-        int n;
-        size_t buflen = 0;
-        *args->buffer[0] = '\0';
+void * threadHandler(void * alist)
+{
+    struct listOfThread * list = (struct listOfThread *) alist;
+    if(NULL == list)
+    {
+        ERRLOG("threadHandler: empty arguments\n");
+        return NULL;
+    }
 
-        while((n = recv(args->client_fd, recv_buf, sizeof(recv_buf), 0)) > 0) {
-            // locate position of newline
-            int k = 0;
-            int has_nl = 0;
-            for (; k < n; k++) if (recv_buf[k] == NEWLINE) {
-                has_nl = 1;
+    FILE * fOutput = NULL;
+    // delayed openning this file
+    if(NULL == fOutput)
+    {
+        // each thread open its own output file. 
+        fOutput = fopen(OUTPUT_FILENAME, "a+");
+        if(NULL == fOutput)
+        {
+            ERRLOG("fopen failed: %s \n", strerror(errno));
+            list->isComplete = true;
+            return NULL;
+        }
+    }
+
+    /// prepare a buffer for the transfer of the data
+    char buffer[SIZE_BUFFER];
+    memset(buffer, 0, SIZE_BUFFER);
+
+    // point to the end of the file to start:
+    fseek(fOutput, 0L, SEEK_END); 
+
+    time_t t = time(NULL);
+    pthread_mutex_lock(&(mutexFOutput));
+    // receive all packages/data
+    int iReceived = 0;
+    do
+    {
+        iReceived = recv(list->sdClient, buffer, SIZE_BUFFER, MSG_DONTWAIT);
+        if(0 < iReceived)
+        {
+           int iRet = fwrite(buffer, 1 , iReceived, fOutput);
+            DBGLOG("Data saved: %d vs received: %d, %d. \n", 
+                    iRet, iReceived, (int) buffer[iReceived - 1]);
+
+            // quit receving when a full packet is received.
+            if('\n' == buffer[iReceived - 1]) 
+            {
+                t = time(NULL);
+                DBGLOG("Full package: %d vs received: %d, %s. \n", 
+                    iRet, iReceived, ctime(&t));
                 break;
             }
-            int currlen = n;
-            if (k+1 < n) {
-                currlen = k+1;
-            }
-
-            append_string(args->buffer, &maxbuflen, buflen, recv_buf, currlen);
-            buflen += currlen;
-
-            if (has_nl) {
-                int rc = pthread_mutex_lock(args->mutex);
-                if (rc != 0) {
-                    syslog(LOG_ERR, "Failure to lock mutex with error code: %d", rc);
-                    break;
-                }
-                // append to the data file
-                append_datafile(data_fd, *args->buffer, strlen(*args->buffer));
-                *args->buffer[0] = '\0'; // make string empty!
-                buflen = 0;
-
-                rc = send_response(data_fd, args->client_fd);
-                if (rc < 0) {
-                    syslog(LOG_ERR, "Failure to send response to the client - %s", args->client_ip_addr);
-                    break;
-                }
-                if ((rc = pthread_mutex_unlock(args->mutex)) != 0) {
-                    syslog(LOG_ERR, "Failure to unlock mutex. Error code: %d", rc);
-                    break;
-                }
-                // data file position will be EOF and we can copy any bytes after NEWLINE
-                if (k < n) {
-                    buflen = n-k-1;
-                    append_string(args->buffer, &maxbuflen, buflen, &recv_buf[k+1], buflen);
-                }
-            }
         }
-    }
 
-    pthread_cleanup_pop(1);
+    } while(((errno == EAGAIN || errno == EWOULDBLOCK) && iReceived <0) || (iReceived > 0));
+    pthread_mutex_unlock(&(mutexFOutput));
 
-    return args;
-}
 
-void connection_cleanup(void* param) {
-    struct aesdsocketclientconn* args = (struct aesdsocketclientconn *)param;
-    
-    close(args->client_fd);
-    syslog(LOG_DEBUG, "Closed connection from %s", args->client_ip_addr);
-    free(*args->buffer);
-    free(args->buffer);
-    free(args->client_ip_addr);
-    pthread_mutex_unlock(args->mutex); // don't need to handle failures since mutex is PTHREAD_MUTEX_ERRORCHECK
-}
+    // really finsihed recving? 
+    t = time(NULL);
+    DBGLOG("Data saved other: %d , %s at %s  \n", iReceived, strerror(errno), ctime(&t));
 
-void accept_conn() {
-    struct sockaddr client_addr;
-    socklen_t client_addr_len = sizeof(client_addr);
+    // make sure all data saved to file.
+    fflush(fOutput);
+    rewind(fOutput);
 
-    int client_fd = accept(server_fd, &client_addr, &client_addr_len);
-    if (client_fd == -1) {
-        syslog(LOG_ERR, "Failed to accept connection: %s", strerror(errno));
-        return;
-    }
-    // get client ip
-    struct sockaddr_in *client_inaddr = (struct sockaddr_in *) &client_addr;
-    char *client_ip_addr = inet_ntoa(client_inaddr->sin_addr);
-
-    pthread_t thread_id;
-    struct aesdsocketclientconn* conn_data = malloc(sizeof *conn_data);
-    conn_data->mutex = &mutex;
-    conn_data->client_fd = client_fd;
-    conn_data->client_ip_addr = malloc(strlen(client_ip_addr)+1);
-    strcpy(conn_data->client_ip_addr, client_ip_addr);
-    conn_data->data_fd = data_fd;
-    conn_data->init_buffer_size = BUFFER_SIZE;
-    conn_data->buffer = malloc(sizeof(char *));
-    *conn_data->buffer = malloc(BUFFER_SIZE);
-
-    int rc = pthread_create(&thread_id, NULL, connnection_handler, conn_data);
-    if (rc != 0) {
-        syslog(LOG_ERR, "Failure to create thread. Error code: %d", rc);        
-        free(conn_data);
-    } else {
-        // track thread for later monitoring
-        clientconn_info* conn = malloc(sizeof(*conn));
-        conn->thread_id = thread_id;
-        conn->ref = conn_data;
-        // conn->conn_status = conn_data->status;
-        SLIST_INSERT_HEAD(&connections, conn, next);
-        // look thru LL and determine if any connections has ended
-        cleanup_term_conn(0);
-    }
-}
-
-void cleanup_term_conn(int await_termination) {
-    clientconn_info *item, *tmp_item;
-
-    SLIST_FOREACH_SAFE(item, &connections, next, tmp_item) {
-        // try join
-        int rc;
-        if (await_termination != 0) {
-            rc = pthread_join(item->thread_id, NULL);
-        } else {
-            rc = pthread_tryjoin_np(item->thread_id, NULL);
-        }
-        if (rc == 0) {
-            SLIST_REMOVE(&connections, item, _clientconn_info, next);
-            free(item->ref);
-            free(item);
-        }
-    }
-}
-
-int register_sighandlers() {
-    struct sigaction app_action;
-    memset(&app_action, 0, sizeof(sigaction));
-    app_action.sa_handler = signal_handler;
-    sigemptyset (&app_action.sa_mask);
-    app_action.sa_flags = 0;
-
-    if (sigaction(SIGTERM, &app_action, NULL) != 0) {
-        perror("Failure to register SIGTERM handler");
-        return -1;
-    }
-    if (sigaction(SIGINT, &app_action, NULL) != 0) {
-        perror("Failure to register SIGINT handler");
-        return -1;
-    }
-
-    return 0;
-}
-
-int start_server(const char *port, int as_daemon) {
-
-    int server_fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (server_fd < 0) {
-        syslog(LOG_ERR, "%s", "Failure to open socket");
-        cleanup();
-        exit(EXIT_FAILURE);
-    }
-    // set SO_REUSEADDR
-    const int enable = 1;
-    if (setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-        syslog(LOG_ERR, "Failed to set socket options - %s", "SO_REUSEADDR");
-        cleanup();
-        exit(EXIT_FAILURE);
-    }
-
-    // get addr
-    struct addrinfo *addr;
-    struct addrinfo hints;
-    
-    memset(&hints, 0, sizeof hints);
-    hints.ai_flags = AI_PASSIVE;
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-
-    int rc = getaddrinfo(NULL, port, &hints, &addr);
-    if (rc != 0) {
-        syslog(LOG_ERR, "Failure to obtain address: return code = %d", rc);
-        cleanup();
-        exit(EXIT_FAILURE);
-    }
-
-    rc = bind(server_fd, addr->ai_addr, sizeof(struct sockaddr));
-    freeaddrinfo(addr);
-    if (rc != 0) {
-        syslog(LOG_ERR, "Unable to bind server on port %s: %s", SERVER_PORT, strerror(errno));
-        cleanup();
-        exit(EXIT_FAILURE);
+    iReceived = 0;
+    // send everything in the file to the client.
+    while(0 < (iReceived = fread(buffer, 1, SIZE_BUFFER, fOutput)))
+    {
+        buffer[iReceived] = '\0'; 
+        int iRet = send(list->sdClient, buffer, iReceived, 0);
+        DBGLOG("Data send: %d vs read: %d, %s \n", iRet, iReceived, buffer);
     }
     
-    if (as_daemon) make_daemon();
+    DBGLOG("Closed connection from %s\n", list->strIP);
+    close(list->sdClient);
+    fclose(fOutput);
+    list->isComplete = true;
 
-    rc = listen(server_fd, LISTEN_BACKLOG);
-    if (rc != 0) {            
-        syslog(LOG_ERR, "Failure to listen socket: %s", strerror(errno));
-        cleanup();
-        exit(EXIT_FAILURE);
-    }
-    syslog(LOG_DEBUG, "Listening for connections on port %s", SERVER_PORT);
-
-    return server_fd;
+    return NULL;
 }
 
-static void timer_action(union sigval arg) {
-    int rc = pthread_mutex_lock(&mutex);
-    if (rc != 0) {
-        syslog(LOG_ERR, "Error locking thread data: %s", strerror(errno));
-    } else {
-        struct timespec ts;
-        rc = clock_gettime(CLOCK_REALTIME, &ts);
-        if (rc != 0) {
-            syslog(LOG_ERR, "Failure to get system wall clock time: %s", strerror(errno));
-        } else {
-            char dt[100], ts_row[120];
-            struct tm tm;
-            tzset();
-            localtime_r(&ts.tv_sec, &tm);
-            size_t len = strftime(dt, 100, ISO_2822_TIME_FMT, &tm);
-            strcpy(ts_row, "timestamp:");
-            strncat(ts_row, dt, len);
-            len = strlen(ts_row);
-            ts_row[len] = NEWLINE;
-            ts_row[len+1] = '\0';
-
-            if (adjust_datafile_pos(data_fd, 0, SEEK_END) > -1) 
-                append_datafile(data_fd, ts_row, strlen(ts_row));
-            else
-                syslog(LOG_ERR, "Failure to adjust data file to position to the end!");
-        }
-        if (pthread_mutex_unlock(&mutex) != 0) {
-            syslog(LOG_ERR, "Failed to unlock thread data: %s", strerror(errno));
-        }
-    }
-}
-
-void create_timer() {
-    struct sigevent sev;
-    memset(&sev, 0, sizeof(struct sigevent));
-    sev.sigev_notify = SIGEV_THREAD;
-    sev.sigev_notify_function = timer_action;
-
-    if (timer_create(CLOCK_MONOTONIC, &sev, &timer_id) != 0) {
-        syslog(LOG_ERR, "Failure to create timer: %s", strerror(errno));
-    } else {
-        struct itimerspec ts;
-        ts.it_interval.tv_sec = 10;
-        ts.it_interval.tv_nsec = 0;
-        ts.it_value.tv_sec = 10;
-        ts.it_value.tv_nsec = 0;
-
-        if (timer_settime(timer_id, 0, &ts, NULL) != 0) {
-            syslog(LOG_ERR, "Failure to arm timer!!!");
-        }
-    }
-}
-
-int main(int argc, char **argv) {
-    int daemon = 0;
-    if (argc == 2 && strcmp(argv[1], "-d") == 0) {
-        daemon = 1;
-    } 
-
-    openlog(NULL, LOG_ODELAY, LOG_USER);
-
-    server_fd = start_server(SERVER_PORT, daemon);
-    if (server_fd < 0) {
-        return EXIT_FAILURE;
-    }
-
-    if (register_sighandlers() != 0) {
-        exit(EXIT_FAILURE);
-    }
-    
-    // start data file
-    data_fd = open_datafile();
-    if (data_fd < 0) {
-        exit(EXIT_FAILURE);
-    }
-    SLIST_INIT(&connections);
-
-    pthread_mutexattr_t attr;
-    pthread_mutexattr_init(&attr);
-    pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_ERRORCHECK);
-    pthread_mutex_init(&mutex, &attr);
-    pthread_mutexattr_destroy(&attr);
-
-    //create_timer();
-
-    for( ; stopApp < 1 ; ) {
-        accept_conn();
-    }
-
-}
