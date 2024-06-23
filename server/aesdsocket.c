@@ -21,7 +21,6 @@
 
 #define SIZE_BUFFER 1000
 #define STR_PORT "9000"
-// ipv6 takes 39 characters
 #define IP_LENTH 39
 
 #define USE_AESD_CHAR_DEVICE 1
@@ -30,9 +29,6 @@
 #else
 #define OUTPUT_FILENAME "/var/tmp/aesdsocketdata"
 #endif
-
-// mask off this to remove Alarm related function.
-//#define USE_ALARM
 
 #define PID_FILE "/var/run/aesdsocket.pid"
 
@@ -244,8 +240,6 @@ int main(int argc, char * argv[])
         if(isAlarmed)
         {
             isAlarmed = false;
-            //RFC 2822-compliant date format with a newline
-            //  (with an English locale for %a and %b)
             char strRFC2822[] = "timestamp:%a, %d %b %Y %T %z\n";
 
             t = time(NULL);
@@ -273,7 +267,6 @@ int main(int argc, char * argv[])
         }
 #endif 
  
-        // Join all complete child threads.
         struct listOfThread * pList = pListHead;
         while(NULL != pList)
         {
@@ -442,10 +435,10 @@ void * threadHandler(void * alist)
     }
 
     FILE * fOutput = NULL;
-    // delayed openning this file
+
     if(NULL == fOutput)
     {
-        // each thread open its own output file. 
+
         fOutput = fopen(OUTPUT_FILENAME, "a+");
         if(NULL == fOutput)
         {
@@ -455,16 +448,15 @@ void * threadHandler(void * alist)
         }
     }
 
-    /// prepare a buffer for the transfer of the data
+
     char buffer[SIZE_BUFFER];
     memset(buffer, 0, SIZE_BUFFER);
 
-    // point to the end of the file to start:
     fseek(fOutput, 0L, SEEK_END); 
 
     time_t t = time(NULL);
     pthread_mutex_lock(&(mutexFOutput));
-    // receive all packages/data
+
     int iReceived = 0;
     do
     {
@@ -475,7 +467,7 @@ void * threadHandler(void * alist)
             DBGLOG("Data saved: %d vs received: %d, %d. \n", 
                     iRet, iReceived, (int) buffer[iReceived - 1]);
 
-            // quit receving when a full packet is received.
+           
             if('\n' == buffer[iReceived - 1]) 
             {
                 t = time(NULL);
@@ -489,16 +481,16 @@ void * threadHandler(void * alist)
     pthread_mutex_unlock(&(mutexFOutput));
 
 
-    // really finsihed recving? 
+   
     t = time(NULL);
     DBGLOG("Data saved other: %d , %s at %s  \n", iReceived, strerror(errno), ctime(&t));
 
-    // make sure all data saved to file.
+   
     fflush(fOutput);
     rewind(fOutput);
 
     iReceived = 0;
-    // send everything in the file to the client.
+   
     while(0 < (iReceived = fread(buffer, 1, SIZE_BUFFER, fOutput)))
     {
         buffer[iReceived] = '\0'; 
@@ -513,4 +505,3 @@ void * threadHandler(void * alist)
 
     return NULL;
 }
-

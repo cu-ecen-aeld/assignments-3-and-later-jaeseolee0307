@@ -1,20 +1,12 @@
-ifeq ($(CROSS_COMPILE),aarch64-none-linux-gnu-)
-	CC ?= $(CROSS_COMPILE)gcc
-endif
+CC?=$(CROSS_COMPILE)gcc
+CFLAGS?= -g -Wall -Werror -pthread
+LDFLAGS?= -pthread
 
-CFLAGS ?= -g -Wall -Werror
-LDFLAGS ?= -lpthread -lrt
-SRC := aesdsocket.c datafile.c
-TARGET ?= aesdsocket
-OBJS := $(SRC:.c=.o)
-
-default_target: all
-
-# Targets
-all: $(TARGET)
-
-$(TARGET) : $(OBJS)	
-	$(CC) $(CFLAGS) $(INCLUDES) $(OBJS) -o $(TARGET) $(LDFLAGS)
-
-clean:
-	-rm -f *.o $(TARGET)
+default: aesdsocket
+all: aesdsocket 
+aesdsocket: aesdsocket.o
+	$(CC) ${LDFLAGS} aesdsocket.o -o aesdsocket
+aesdsocket.o: aesdsocket.c
+	$(CC) -c ${CFLAGS}  aesdsocket.c -o aesdsocket.o
+clean:   
+	rm -f aesdsocket aesdsocket.o
