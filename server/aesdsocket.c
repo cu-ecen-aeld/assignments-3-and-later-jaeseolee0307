@@ -19,6 +19,8 @@
 #include <pthread.h>
 #include <sys/time.h>
 
+#include "../aesd-char-driver/aesd_ioctl.h"
+
 #define SIZE_BUFFER 1000
 #define STR_PORT "9000"
 // ipv6 takes 39 characters
@@ -153,7 +155,6 @@ int main(int argc, char * argv[])
         DBGLOG("port: %s\n", inet_ntop(AF_INET, &addr->sin_port, (void *)&port, 2));
         DBGLOG("- family: %d\n", addr->sin_family);
 
-        // try other addresses ....
         if(0!= bind(sdListen, cur->ai_addr, cur->ai_addrlen))
         {
             ERRLOG("bind failed: %s, try next one. \n", strerror(errno));
@@ -180,19 +181,17 @@ int main(int argc, char * argv[])
         pid_t pRetFork = fork();
         if(-1 == pRetFork)
         {
-            // if something wrong happened,
+            
             goto freeAddrinfo;
         }
 
         if(0 == pRetFork)
         {
-            // We are in child process and return only failed.
-            // child process continues ... 
-            //if(-1 == setsid())
+      
         }
         else
         {
-            // record child process id
+       
             FILE * pidfile = fopen(PID_FILE, "w");
             if(NULL != pidfile)
             {
@@ -201,7 +200,7 @@ int main(int argc, char * argv[])
                 fclose(pidfile);
             }
 
-            // we are in parent process
+         
             goto successExit;
         }
     }
@@ -221,7 +220,6 @@ int main(int argc, char * argv[])
         goto freeAddrinfo;
     }
 
-    // setup a timer for every 10s 
     struct itimerval newValue;
     newValue.it_interval.tv_sec = 10; // every 10 seconds
     newValue.it_interval.tv_usec = 0;
@@ -233,7 +231,7 @@ int main(int argc, char * argv[])
 #endif // USE_ALARM
     
     time_t t = time(NULL);
-    // start services:
+
     while(!quitServices)
     {
         struct sockaddr clientAddr; 
@@ -244,8 +242,7 @@ int main(int argc, char * argv[])
         if(isAlarmed)
         {
             isAlarmed = false;
-            //RFC 2822-compliant date format with a newline
-            //  (with an English locale for %a and %b)
+      
             char strRFC2822[] = "timestamp:%a, %d %b %Y %T %z\n";
 
             t = time(NULL);
@@ -273,7 +270,6 @@ int main(int argc, char * argv[])
         }
 #endif 
  
-        // Join all complete child threads.
         struct listOfThread * pList = pListHead;
         while(NULL != pList)
         {
@@ -298,7 +294,7 @@ int main(int argc, char * argv[])
         }
         
 
-        //  
+        
         int sdClient = accept(sdListen, &clientAddr, &clientAddrLen);
         if(-1 == sdClient)
         {
@@ -314,12 +310,10 @@ int main(int argc, char * argv[])
         pList = malloc(sizeof(struct listOfThread));
         if(NULL == pList)
         {
-            // running out of memory?
             ERRLOG(" failed malloc pList: %s \n", strerror(errno));
             break;
         }
 
-        // get the ip address of the client:
         memset(pList->strIP, 0, IP_LENTH);
         strGetIP(&clientAddr, pList->strIP, IP_LENTH);
         DBGLOG("Accepted connection from %s , %d @ %s.\n", 
@@ -345,7 +339,7 @@ int main(int argc, char * argv[])
         int iRet = pthread_create(&(pList->thread),NULL, &threadHandler, pList); 
         if(0 != iRet)
         {
-            // when thread created wrong, will remove it from list:
+
             pListTail = pList->pPrevious;
             if(NULL != pListTail)
                 pListTail->pNext = NULL;
@@ -442,10 +436,10 @@ void * threadHandler(void * alist)
     }
 
     FILE * fOutput = NULL;
-    // delayed openning this file
+    int fOutputFD = -1;
+  
     if(NULL == fOutput)
     {
-        // each thread open its own output file. 
         fOutput = fopen(OUTPUT_FILENAME, "a+");
         if(NULL == fOutput)
         {
@@ -453,29 +447,48 @@ void * threadHandler(void * alist)
             list->isComplete = true;
             return NULL;
         }
+        fOutputFD = fileno(fOutput);
     }
 
-    /// prepare a buffer for the transfer of the data
+
     char buffer[SIZE_BUFFER];
     memset(buffer, 0, SIZE_BUFFER);
 
-    // point to the end of the file to start:
-    fseek(fOutput, 0L, SEEK_END); 
-
     time_t t = time(NULL);
     pthread_mutex_lock(&(mutexFOutput));
-    // receive all packages/data
+
     int iReceived = 0;
+    bool ifRewind = true;
     do
     {
+        ifRewind = true;
         iReceived = recv(list->sdClient, buffer, SIZE_BUFFER, MSG_DONTWAIT);
         if(0 < iReceived)
         {
-           int iRet = fwrite(buffer, 1 , iReceived, fOutput);
+        
+            struct aesd_seekto seekTo; 
+            if(0 == strncmp(buffer, "AESDCHAR_IOCSEEKTO:", 19))
+            {
+                DBGLOG("Found a command:%s. \n", buffer);
+                if(2 == sscanf(buffer, "AESDCHAR_IOCSEEKTO:%d,%d", 
+                    &(seekTo.write_cmd), &(seekTo.write_cmd_offset)))
+                {
+                    DBGLOG("Found a command:%s, %d,%d. \n",     
+                        buffer,seekTo.write_cmd,seekTo.write_cmd_offset);
+
+                    if(-1 != fOutputFD)
+                    {
+                        ioctl(fOutputFD, AESDCHAR_IOCSEEKTO, (unsigned long)&seekTo); 
+                        ifRewind = false;
+                        break;
+                    }
+                }
+            }
+
+            int iRet = fwrite(buffer, 1 , iReceived, fOutput);
             DBGLOG("Data saved: %d vs received: %d, %d. \n", 
                     iRet, iReceived, (int) buffer[iReceived - 1]);
 
-            // quit receving when a full packet is received.
             if('\n' == buffer[iReceived - 1]) 
             {
                 t = time(NULL);
@@ -489,16 +502,18 @@ void * threadHandler(void * alist)
     pthread_mutex_unlock(&(mutexFOutput));
 
 
-    // really finsihed recving? 
     t = time(NULL);
     DBGLOG("Data saved other: %d , %s at %s  \n", iReceived, strerror(errno), ctime(&t));
 
     // make sure all data saved to file.
-    fflush(fOutput);
-    rewind(fOutput);
+    if (ifRewind)
+    {
+        fflush(fOutput);
+        rewind(fOutput);
+    }
 
     iReceived = 0;
-    // send everything in the file to the client.
+    
     while(0 < (iReceived = fread(buffer, 1, SIZE_BUFFER, fOutput)))
     {
         buffer[iReceived] = '\0'; 
@@ -513,4 +528,3 @@ void * threadHandler(void * alist)
 
     return NULL;
 }
-
