@@ -91,6 +91,4 @@ extern void aesd_circular_buffer_remove_entry(
             index++, entryptr=&((buffer)->entry[index]))
 
 
-
 #endif /* AESD_CIRCULAR_BUFFER_H */
-

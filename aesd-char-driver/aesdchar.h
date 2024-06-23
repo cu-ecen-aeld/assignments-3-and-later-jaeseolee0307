@@ -36,4 +36,3 @@ struct aesd_dev
 
 
 #endif /* AESD_CHAR_DRIVER_AESDCHAR_H_ */
-
