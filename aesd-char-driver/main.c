@@ -24,7 +24,7 @@
 int aesd_major =   0; // use dynamic major
 int aesd_minor =   0;
 
-MODULE_AUTHOR("Mengjia Wang"); 
+MODULE_AUTHOR("jaeseolee"); 
 MODULE_LICENSE("Dual BSD/GPL");
 
 struct aesd_dev aesd_device;
@@ -86,7 +86,7 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
     AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&circularBuffer,index)
     {
-      
+        // user' buf is used up. 
         if (count <= 0) 
             break;
 
@@ -94,10 +94,11 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             index, circularBuffer.out_offs, circularBuffer.in_offs);
         PDEBUG("aesd_read *f_pos:%ld, entryOffset:%ld, size:%ld ", *f_pos, entryOffset, entryptr->size); 
 
-       
+        // if f_pos in part of an item.
         if(*f_pos >= entryOffset && *f_pos < entryOffset + entryptr->size)
         {
 
+            // copy partial of the items
             size_t copyFromOffset = *f_pos - entryOffset;
             size_t copyLength = 0;
             if(entryptr->size - copyFromOffset >= count)
@@ -113,18 +114,18 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             PDEBUG("aesd_read 1 %zu bytes from offset %lld, from (%lld-%ld) ",
                 count,*f_pos, entryOffset + copyFromOffset, copyLength );
 
-   
+            // next time copy to 
             copyToOffset += copyLength;
 
-  
+            // how much space left in user's buf 
             count -= copyLength;
 
-
+            // how many copied in total.
             accumlatedCopied += copyLength;
         }
         else if(*f_pos < entryOffset)
         {
-          
+            // copy the whole item.
             size_t copyFromOffset = 0 ;
             size_t copyLength = entryptr->size; 
             if(copyLength > count)
@@ -145,6 +146,24 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
     
         entryOffset += entryptr->size;
     }
+
+   /* 
+    struct aesd_buffer_entry * pEntry = 
+        aesd_circular_buffer_find_entry_offset_for_fpos(
+            &circularBuffer, *f_pos, &entryOffset);
+
+    if(NULL != pEntry)
+    {
+        size_t countToCopy = pEntry->size - entryOffset ;
+        if(countToCopy > count)
+            countToCopy = count;
+        unsigned long result = copy_to_user(buf, pEntry->buffptr + entryOffset, countToCopy);
+        if(0 != result)
+           PDEBUG("aesd_read copy_to_user result:%ld ", result); 
+
+        PDEBUG("aesd_read offset %lld, returned: %s : %ld",*f_pos, pEntry->buffptr + entryOffset, (unsigned long)countToCopy);
+    }
+    */
 
     up_read(&circularBufferLock);
 
@@ -171,6 +190,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     struct aesd_buffer_entry entryToIncompleteWrite; 
     struct aesd_buffer_entry entryToCircularBuffer; 
 
+    // adding 1 extra for '\0' char for debug purpose.
     entryToIncompleteWrite.buffptr = aesd_malloc(count + 1, "loc 1" );
     char * pchar = (char*)entryToIncompleteWrite.buffptr;
     pchar[count] = '\0';
@@ -199,7 +219,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     down_write(&incompleteWriteBufferLock);
     
- 
+    // if incomplete buffer is full, free the first item.
     if(incompleteWriteBuffer.full)
     { 
         struct aesd_buffer_entry aEntry; 
@@ -208,18 +228,21 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     PDEBUG("write to incompleteWriteBuffer first \n");
-   
+    // regardless this item is end with a '\n', add them to the incomplete buffer first.
     aesd_circular_buffer_add_entry(&incompleteWriteBuffer, &entryToIncompleteWrite);
 
+    // if last char is a 'line return char' : we transfer everything in the 
+    // incomplete buffer to the circularBuffer
     if('\n' == entryToIncompleteWrite.buffptr[count-1])
     {
         PDEBUG("write there is a line return char\n");
 
-    
+        // we need to make a buffer big enough for everything in the incomplete buffer 
         int iTotalSize = 0 ;
         int index = 0;
         struct aesd_buffer_entry * entryptr;
 
+        // search all items and find the total size;
         AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&incompleteWriteBuffer,index)
             iTotalSize += entryptr->size;
 
@@ -235,6 +258,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             return -ENOMEM;
         }
         
+        // copy everything from pIncompleteWriteBufferLock to newEntry
         int i = 0 ;
         AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&incompleteWriteBuffer,index)
         {
@@ -242,13 +266,13 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             memcpy(pVoid, entryptr->buffptr, entryptr->size);
             i += entryptr->size;
 
-
+            // free each buffptr
             aesd_free(entryptr->buffptr, "loc 5");
             entryptr->buffptr=NULL;
             entryptr->size=0;
         }
 
-       
+        // empty the incomplete buffer
         aesd_circular_buffer_init(&incompleteWriteBuffer);
     }
     
@@ -258,7 +282,7 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     {
         down_write(&circularBufferLock);  
 
-     
+        // if the circular buffer is full, we remove the first item.
         if(circularBuffer.full)
         {
             struct aesd_buffer_entry aEntry; 
@@ -364,6 +388,10 @@ void aesd_cleanup_module(void)
     {
         PDEBUG("cleanup circularBuffer index = %d \n", index);
         
+//        if(circularBuffer.entry[index].buffptr != entryptr->buffptr)
+//            PDEBUG("cleanup WHAT circularBuffer index = %d \n", index);
+
+        // free each buffptr
         aesd_free(entryptr->buffptr, "loc 8");
         entryptr->buffptr=NULL;
         entryptr->size=0;
