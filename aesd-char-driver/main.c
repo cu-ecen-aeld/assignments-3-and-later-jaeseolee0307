@@ -65,7 +65,6 @@ int aesd_release(struct inode *inode, struct file *filp)
 ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
                 loff_t *f_pos)
 {
-    // we need an offset and a buffer
     if(NULL == f_pos || NULL == buf) 
     {
         PDEBUG("aesd_read null f_pos or buf");
@@ -74,7 +73,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
     PDEBUG("aesd_read %zu bytes with offset %lld, while reading offset %lld,"
         ,count,*f_pos, filp->f_pos);
-
 
     down_read(&circularBufferLock);
 
@@ -86,14 +84,14 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 
     AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&circularBuffer,index)
     {
-       
+        // user' buf is used up. 
         if (count <= 0) 
             break;
 
         if(*f_pos >= entryOffset && *f_pos < entryOffset + entryptr->size)
         {
 
-      
+            // copy partial of the items
             size_t copyFromOffset = *f_pos - entryOffset;
             size_t copyLength = 0;
             if(entryptr->size - copyFromOffset >= count)
@@ -109,18 +107,15 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
             PDEBUG("aesd_read 1 %zu bytes from offset %lld, from (%lld-%ld) ",
                 count,*f_pos, entryOffset + copyFromOffset, copyLength );
 
-           
             copyToOffset += copyLength;
 
-          
             count -= copyLength;
 
-           
             accumlatedCopied += copyLength;
         }
         else if(*f_pos < entryOffset)
         {
-            
+
             size_t copyFromOffset = 0 ;
             size_t copyLength = entryptr->size; 
             if(copyLength > count)
@@ -151,7 +146,6 @@ ssize_t aesd_read(struct file *filp, char __user *buf, size_t count,
 void * aesd_malloc(size_t count, char * log)
 {
     void * vp = kmalloc(count, GFP_KERNEL);
-   
     return vp;
 }
 
@@ -166,7 +160,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     struct aesd_buffer_entry entryToIncompleteWrite; 
     struct aesd_buffer_entry entryToCircularBuffer; 
 
-    
     entryToIncompleteWrite.buffptr = aesd_malloc(count + 1, "loc 1" );
     char * pchar = (char*)entryToIncompleteWrite.buffptr;
     pchar[count] = '\0';
@@ -195,7 +188,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
 
     down_write(&incompleteWriteBufferLock);
     
-   
     if(incompleteWriteBuffer.full)
     { 
         struct aesd_buffer_entry aEntry; 
@@ -204,19 +196,19 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
     }
 
     PDEBUG("write to incompleteWriteBuffer first \n");
- 
     aesd_circular_buffer_add_entry(&incompleteWriteBuffer, &entryToIncompleteWrite);
 
-    
+
     if('\n' == entryToIncompleteWrite.buffptr[count-1])
     {
         PDEBUG("write there is a line return char\n");
 
+        // we need to make a buffer big enough for everything in the incomplete buffer 
         int iTotalSize = 0 ;
         int index = 0;
         struct aesd_buffer_entry * entryptr;
 
-
+        // search all items and find the total size;
         AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&incompleteWriteBuffer,index)
             iTotalSize += entryptr->size;
 
@@ -239,7 +231,6 @@ ssize_t aesd_write(struct file *filp, const char __user *buf, size_t count,
             memcpy(pVoid, entryptr->buffptr, entryptr->size);
             i += entryptr->size;
 
-        
             aesd_free((void*) entryptr->buffptr, "loc 5");
             entryptr->buffptr=NULL;
             entryptr->size=0;
@@ -286,13 +277,6 @@ loff_t aesd_llseek(struct file * pfile, loff_t offset, int whence)
     return toReturn;
 }
 
-/*
-    Adjust the file offset (f_pos) parameter of @param filp based on the location specified by
-    @parameter write_cmd (the zero referenced command to locate)
-    @return 0 if successful, negative if error occurred:
-        -ERESTARTSYS if mutex could not be obtained, 
-        -EINVAL if write command or write_cmd_offset was out of range
-*/
 long aesd_adjust_file_offset(
     struct file * pfile, unsigned int write_cmd, unsigned int write_cmd_offset)
 {
@@ -319,8 +303,10 @@ long aesd_adjust_file_offset(
 
     AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&circularBuffer,index)
     {
+        // save the size of current cmd
         iSizeCurrentCMD = entryptr->size;
 
+        // find the right cmd by index
         if(index == write_cmd)
             break;
 
@@ -422,16 +408,13 @@ void aesd_cleanup_module(void)
 
     cdev_del(&aesd_device.cdev);
 
-    /**
-     * TODO: cleanup AESD specific poritions here as necessary
-     */
-
     unregister_chrdev_region(devno, 1);
 
     int index;
     struct aesd_buffer_entry * entryptr;
     AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&incompleteWriteBuffer,index)
     {
+        // free each buffptr
         aesd_free((void*) entryptr->buffptr, "loc 7");
         entryptr->buffptr=NULL;
         entryptr->size=0;
@@ -443,7 +426,7 @@ void aesd_cleanup_module(void)
     AESD_CIRCULAR_BUFFER_FOREACH_A(entryptr,&circularBuffer,index)
     {
         PDEBUG("cleanup circularBuffer index = %d \n", index);
-
+        
         aesd_free((void*) entryptr->buffptr, "loc 8");
         entryptr->buffptr=NULL;
         entryptr->size=0;
@@ -452,7 +435,6 @@ void aesd_cleanup_module(void)
  
 }
 
-
-
 module_init(aesd_init_module);
 module_exit(aesd_cleanup_module);
+

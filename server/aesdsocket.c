@@ -33,12 +33,7 @@
 #define OUTPUT_FILENAME "/var/tmp/aesdsocketdata"
 #endif
 
-// mask off this to remove Alarm related function.
-//#define USE_ALARM
-
 #define PID_FILE "/var/run/aesdsocket.pid"
-
-//#define LOGCONSOLE 
 
 #if defined (LOGCONSOLE)
 #define DBGLOG(...) printf (__VA_ARGS__)
@@ -48,8 +43,6 @@
 #define ERRLOG(...) syslog(LOG_ERR,__VA_ARGS__) 
 #endif
 
-
-// thread realted items;
 struct listOfThread 
 {
     pthread_t thread; 
@@ -68,7 +61,6 @@ static struct listOfThread * pListTail = NULL;
 static pthread_mutex_t mutexFOutput;
 
 void * threadHandler(void *);
-
 
 int strGetIP(const struct sockaddr *sa, char *s, size_t maxlen);
 void signalHandler(int signal);
@@ -134,9 +126,6 @@ int main(int argc, char * argv[])
     struct addrinfo *addInfo = NULL;  
     memset(&serverAdd, 0, sizeof(serverAdd));
 
-    // If the AI_PASSIVE flag is specified in hints.ai_flags, and node  is  NULL,
-    // then  the  returned  socket  addresses  will  be suitable for bind(2)ing a
-    // socket that will accept(2) connections.
     serverAdd.ai_flags = AI_PASSIVE;
     if(0 != getaddrinfo(NULL, STR_PORT, &serverAdd, &addInfo))
     {
@@ -155,6 +144,7 @@ int main(int argc, char * argv[])
         DBGLOG("port: %s\n", inet_ntop(AF_INET, &addr->sin_port, (void *)&port, 2));
         DBGLOG("- family: %d\n", addr->sin_family);
 
+        // try other addresses ....
         if(0!= bind(sdListen, cur->ai_addr, cur->ai_addrlen))
         {
             ERRLOG("bind failed: %s, try next one. \n", strerror(errno));
@@ -162,7 +152,6 @@ int main(int argc, char * argv[])
         }
         else
         {
-            // success in binding ... 
             bBind = true;
             break;
         }
@@ -181,17 +170,16 @@ int main(int argc, char * argv[])
         pid_t pRetFork = fork();
         if(-1 == pRetFork)
         {
-            
             goto freeAddrinfo;
         }
 
         if(0 == pRetFork)
         {
-      
+
         }
         else
         {
-       
+            // record child process id
             FILE * pidfile = fopen(PID_FILE, "w");
             if(NULL != pidfile)
             {
@@ -200,7 +188,7 @@ int main(int argc, char * argv[])
                 fclose(pidfile);
             }
 
-         
+            // we are in parent process
             goto successExit;
         }
     }
@@ -220,6 +208,7 @@ int main(int argc, char * argv[])
         goto freeAddrinfo;
     }
 
+    // setup a timer for every 10s 
     struct itimerval newValue;
     newValue.it_interval.tv_sec = 10; // every 10 seconds
     newValue.it_interval.tv_usec = 0;
@@ -231,7 +220,7 @@ int main(int argc, char * argv[])
 #endif // USE_ALARM
     
     time_t t = time(NULL);
-
+    // start services:
     while(!quitServices)
     {
         struct sockaddr clientAddr; 
@@ -242,7 +231,8 @@ int main(int argc, char * argv[])
         if(isAlarmed)
         {
             isAlarmed = false;
-      
+            //RFC 2822-compliant date format with a newline
+            //  (with an English locale for %a and %b)
             char strRFC2822[] = "timestamp:%a, %d %b %Y %T %z\n";
 
             t = time(NULL);
@@ -294,7 +284,7 @@ int main(int argc, char * argv[])
         }
         
 
-        
+        //  
         int sdClient = accept(sdListen, &clientAddr, &clientAddrLen);
         if(-1 == sdClient)
         {
@@ -310,6 +300,7 @@ int main(int argc, char * argv[])
         pList = malloc(sizeof(struct listOfThread));
         if(NULL == pList)
         {
+            // running out of memory?
             ERRLOG(" failed malloc pList: %s \n", strerror(errno));
             break;
         }
@@ -339,7 +330,6 @@ int main(int argc, char * argv[])
         int iRet = pthread_create(&(pList->thread),NULL, &threadHandler, pList); 
         if(0 != iRet)
         {
-
             pListTail = pList->pPrevious;
             if(NULL != pListTail)
                 pListTail->pNext = NULL;
@@ -358,7 +348,6 @@ int main(int argc, char * argv[])
         DBGLOG("Remove file %s failed.\n", OUTPUT_FILENAME);
 #endif
     
-    // Join all child threads.
     struct listOfThread * pList = pListHead;
     while(NULL != pList)
     {
@@ -437,9 +426,10 @@ void * threadHandler(void * alist)
 
     FILE * fOutput = NULL;
     int fOutputFD = -1;
-  
+
     if(NULL == fOutput)
     {
+   
         fOutput = fopen(OUTPUT_FILENAME, "a+");
         if(NULL == fOutput)
         {
@@ -449,7 +439,6 @@ void * threadHandler(void * alist)
         }
         fOutputFD = fileno(fOutput);
     }
-
 
     char buffer[SIZE_BUFFER];
     memset(buffer, 0, SIZE_BUFFER);
@@ -465,7 +454,7 @@ void * threadHandler(void * alist)
         iReceived = recv(list->sdClient, buffer, SIZE_BUFFER, MSG_DONTWAIT);
         if(0 < iReceived)
         {
-        
+      
             struct aesd_seekto seekTo; 
             if(0 == strncmp(buffer, "AESDCHAR_IOCSEEKTO:", 19))
             {
@@ -489,6 +478,7 @@ void * threadHandler(void * alist)
             DBGLOG("Data saved: %d vs received: %d, %d. \n", 
                     iRet, iReceived, (int) buffer[iReceived - 1]);
 
+            // quit receving when a full packet is received.
             if('\n' == buffer[iReceived - 1]) 
             {
                 t = time(NULL);
@@ -501,11 +491,9 @@ void * threadHandler(void * alist)
     } while(((errno == EAGAIN || errno == EWOULDBLOCK) && iReceived <0) || (iReceived > 0));
     pthread_mutex_unlock(&(mutexFOutput));
 
-
     t = time(NULL);
     DBGLOG("Data saved other: %d , %s at %s  \n", iReceived, strerror(errno), ctime(&t));
 
-    // make sure all data saved to file.
     if (ifRewind)
     {
         fflush(fOutput);
@@ -513,7 +501,7 @@ void * threadHandler(void * alist)
     }
 
     iReceived = 0;
-    
+
     while(0 < (iReceived = fread(buffer, 1, SIZE_BUFFER, fOutput)))
     {
         buffer[iReceived] = '\0'; 
@@ -528,3 +516,4 @@ void * threadHandler(void * alist)
 
     return NULL;
 }
+

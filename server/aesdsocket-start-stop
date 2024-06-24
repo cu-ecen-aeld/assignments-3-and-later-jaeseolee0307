@@ -16,13 +16,9 @@ if [ -f "/usr/bin/$DAEMON" ] ; then
 LOCDAEMON="/usr/bin/${DAEMON}"
 fi
 
-# BusyBox' klogd does not create a pidfile, so pass "-n" in the command line
-# and use "-m" to instruct start-stop-daemon to create one.
+
 start() {
 	printf 'Starting %s: ' "$DAEMON"
-	# shellcheck disable=SC2086 # we need the word splitting
-	#start-stop-daemon -b -m -S -q -p "$PIDFILE" -x "/sbin/$DAEMON" \
-	#	-- -n $KLOGD_ARGS
 	
 	start-stop-daemon --start --quiet --pidfile "$PIDFILE" -x "$LOCDAEMON"  -- $AESD_ARGS
 	status=$?
@@ -63,3 +59,4 @@ case "$1" in
 		echo "Usage: $0 {start|stop|restart|reload}"
 		exit 1
 esac
+
